@@ -1,0 +1,11 @@
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+return new class extends Migration {
+ public function up(): void {
+  Schema::create('referrals',function(Blueprint $t){ $t->id(); $t->string('code',40)->nullable()->unique(); $t->foreignId('patient_id')->constrained()->restrictOnDelete(); $t->foreignId('origin_facility_id')->constrained('health_facilities')->restrictOnDelete(); $t->foreignId('receiving_facility_id')->constrained('health_facilities')->restrictOnDelete(); $t->foreignId('requested_specialty_id')->nullable()->constrained('specialties')->nullOnDelete(); $t->string('source_professional_name',150)->nullable(); $t->foreignId('registered_by')->constrained('users')->restrictOnDelete(); $t->dateTime('referred_at'); $t->text('reason'); $t->text('clinical_summary')->nullable(); $t->string('priority',20)->default('normal'); $t->string('status',30)->default('recibida')->index(); $t->dateTime('received_at')->nullable(); $t->dateTime('closed_at')->nullable(); $t->timestamps(); $t->index(['patient_id','status']); });
+  Schema::create('interconsultations',function(Blueprint $t){ $t->id(); $t->string('code',40)->nullable()->unique(); $t->foreignId('reference_id')->nullable()->constrained('referrals')->nullOnDelete(); $t->foreignId('patient_id')->constrained()->restrictOnDelete(); $t->foreignId('parent_interconsultation_id')->nullable()->constrained('interconsultations')->nullOnDelete(); $t->foreignId('requested_by')->constrained('users')->restrictOnDelete(); $t->foreignId('from_specialty_id')->constrained('specialties')->restrictOnDelete(); $t->foreignId('to_specialty_id')->constrained('specialties')->restrictOnDelete(); $t->foreignId('assigned_professional_id')->nullable()->constrained('professionals')->nullOnDelete(); $t->text('reason'); $t->text('clinical_summary')->nullable(); $t->string('priority',20)->default('normal'); $t->string('status',30)->default('pendiente')->index(); $t->dateTime('requested_at'); $t->dateTime('scheduled_at')->nullable(); $t->dateTime('answered_at')->nullable(); $t->text('response_summary')->nullable(); $t->dateTime('closed_at')->nullable(); $t->timestamps(); $t->index(['patient_id','status']); });
+ }
+ public function down(): void { Schema::dropIfExists('interconsultations'); Schema::dropIfExists('referrals'); }
+};

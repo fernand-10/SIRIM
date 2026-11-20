@@ -1,0 +1,12 @@
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+return new class extends Migration {
+ public function up(): void {
+  Schema::create('appointments',function(Blueprint $t){ $t->id(); $t->foreignId('patient_id')->constrained()->restrictOnDelete(); $t->foreignId('reference_id')->nullable()->constrained('referrals')->nullOnDelete(); $t->foreignId('interconsultation_id')->nullable()->constrained('interconsultations')->nullOnDelete(); $t->foreignId('professional_id')->constrained('professionals')->restrictOnDelete(); $t->foreignId('specialty_id')->constrained('specialties')->restrictOnDelete(); $t->dateTime('scheduled_at'); $t->unsignedSmallInteger('duration_minutes')->default(20); $t->string('status',25)->default('programada')->index(); $t->text('notes')->nullable(); $t->foreignId('created_by')->constrained('users')->restrictOnDelete(); $t->timestamps(); $t->index(['professional_id','scheduled_at']); });
+  Schema::create('medical_attentions',function(Blueprint $t){ $t->id(); $t->foreignId('patient_id')->constrained()->restrictOnDelete(); $t->foreignId('reference_id')->nullable()->constrained('referrals')->nullOnDelete(); $t->foreignId('interconsultation_id')->nullable()->constrained('interconsultations')->nullOnDelete(); $t->foreignId('appointment_id')->nullable()->constrained('appointments')->nullOnDelete(); $t->foreignId('professional_id')->constrained('professionals')->restrictOnDelete(); $t->foreignId('specialty_id')->constrained('specialties')->restrictOnDelete(); $t->dateTime('attended_at'); $t->text('reason'); $t->longText('clinical_notes')->nullable(); $t->longText('outcome'); $t->longText('plan')->nullable(); $t->foreignId('created_by')->constrained('users')->restrictOnDelete(); $t->timestamps(); $t->index(['patient_id','attended_at']); });
+  Schema::create('status_histories',function(Blueprint $t){ $t->id(); $t->string('entity_type',40)->index(); $t->unsignedBigInteger('entity_id')->index(); $t->string('old_status',30)->nullable(); $t->string('new_status',30); $t->text('observations')->nullable(); $t->foreignId('changed_by')->constrained('users')->restrictOnDelete(); $t->dateTime('created_at'); $t->index(['entity_type','entity_id','created_at']); });
+ }
+ public function down(): void { Schema::dropIfExists('status_histories'); Schema::dropIfExists('medical_attentions'); Schema::dropIfExists('appointments'); }
+};
