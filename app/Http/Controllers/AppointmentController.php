@@ -217,6 +217,259 @@ class AppointmentController extends Controller
         return redirect()->route('citas.index')->with('success', 'Cita interna programada correctamente.');
     }
 
+    public function availability(Request $request, Professional $professional)
+    {
+        $data = $request->validate([
+            'date' => ['required', 'date_format:Y-m-d', 'after_or_equal:today'],
+            'patient_id' => ['nullable', 'integer', 'exists:patients,id'],
+        ]);
+
+        if (!$professional->is_active) {
+            return response()->json(['slots' => []]);
+        }
+
+        if (
+            $request->user()->isDoctor()
+            && (int) $request->user()->professional?->id !== (int) $professional->id
+        ) {
+            abort(403);
+        }
+
+        $date = $data['date'];
+        $dayOfWeek = Carbon::parse($date)->dayOfWeekIso;
+
+        $schedules = ProfessionalSchedule::where('professional_id', $professional->id)
+            ->where('day_of_week', $dayOfWeek)
+            ->where('is_active', true)
+            ->orderBy('start_time')
+            ->get();
+
+        $slots = [];
+
+        foreach ($schedules as $schedule) {
+            $start = Carbon::parse($date . ' ' . $schedule->start_time);
+            $shiftEnd = Carbon::parse($date . ' ' . $schedule->end_time);
+            $duration = (int) $schedule->slot_duration;
+
+            if ($duration < 1) {
+                continue;
+            }
+
+            while ($start->copy()->addMinutes($duration)->lte($shiftEnd)) {
+                $end = $start->copy()->addMinutes($duration);
+
+                if ($start->gte(now())) {
+                    $blocked = ProfessionalBlock::where('professional_id', $professional->id)
+                        ->where('starts_at', '<', $end)
+                        ->where('ends_at', '>', $start)
+                        ->exists();
+
+                    $professionalConflict = Appointment::where('professional_id', $professional->id)
+                        ->whereIn('status', ['programada', 'confirmada'])
+                        ->where('scheduled_at', '<', $end)
+                        ->whereRaw(
+                            'DATE_ADD(scheduled_at, INTERVAL duration_minutes MINUTE) > ?',
+                            [$start->format('Y-m-d H:i:s')]
+                        )
+                        ->exists();
+
+                    $patientConflict = false;
+
+                    if (!empty($data['patient_id'])) {
+                        $patientConflict = Appointment::where('patient_id', $data['patient_id'])
+                            ->whereIn('status', ['programada', 'confirmada'])
+                            ->where('scheduled_at', '<', $end)
+                            ->whereRaw(
+                                'DATE_ADD(scheduled_at, INTERVAL duration_minutes MINUTE) > ?',
+                                [$start->format('Y-m-d H:i:s')]
+                            )
+                            ->exists();
+                    }
+
+                    if (!$blocked && !$professionalConflict && !$patientConflict) {
+                        $slots[] = [
+                            'value' => $start->format('Y-m-d\TH:i'),
+                            'label' => $start->format('H:i'),
+                            'duration_minutes' => $duration,
+                        ];
+                    }
+                }
+
+                $start->addMinutes($duration);
+            }
+        }
+
+        return response()->json(['slots' => $slots]);
+    }
+
+
+
+
+    /**
+     * Devuelve en una sola consulta los horarios disponibles de todos
+     * los profesionales activos de una especialidad para una fecha.
+     */
+    public function specialtyAvailability(Request $request, int $specialtyId)
+    {
+        $data = $request->validate([
+            'date' => ['required', 'date_format:Y-m-d', 'after_or_equal:today'],
+            'duration_minutes' => ['required', 'integer', 'min:10', 'max:240'],
+            'patient_id' => ['nullable', 'integer', 'exists:patients,id'],
+        ]);
+
+        $specialty = Specialty::query()
+            ->where('is_active', true)
+            ->findOrFail($specialtyId);
+
+        $date = $data['date'];
+        $duration = (int) $data['duration_minutes'];
+        $dayStart = Carbon::createFromFormat('Y-m-d', $date)->startOfDay();
+        $dayEnd = $dayStart->copy()->addDay();
+
+        // Personal de la especialidad. Un médico solo puede consultar su propia agenda.
+        $professionalQuery = Professional::with('user:id,name')
+            ->where('specialty_id', $specialty->id)
+            ->where('is_active', true);
+
+        if ($request->user()->isDoctor()) {
+            $professionalQuery->whereKey($request->user()->professional?->id ?? 0);
+        }
+
+        $professionals = $professionalQuery->orderBy('id')->get();
+        $professionalIds = $professionals->modelKeys();
+
+        if (empty($professionalIds)) {
+            return response()->json([
+                'date' => $date,
+                'specialty_id' => $specialty->id,
+                'duration_minutes' => $duration,
+                'slots' => [],
+            ]);
+        }
+
+        // Turnos activos del día cuya duración coincide con la elegida en el formulario.
+        $schedules = ProfessionalSchedule::query()
+            ->whereIn('professional_id', $professionalIds)
+            ->where('day_of_week', $dayStart->dayOfWeekIso)
+            ->where('slot_duration', $duration)
+            ->where('is_active', true)
+            ->orderBy('start_time')
+            ->get()
+            ->groupBy('professional_id');
+
+        // Ausencias y bloqueos que se cruzan con el día consultado.
+        $blocks = ProfessionalBlock::query()
+            ->whereIn('professional_id', $professionalIds)
+            ->where('starts_at', '<', $dayEnd)
+            ->where('ends_at', '>', $dayStart)
+            ->get(['professional_id', 'starts_at', 'ends_at'])
+            ->groupBy('professional_id');
+
+        // Citas activas que ocupan intervalos de los profesionales.
+        $appointments = Appointment::query()
+            ->whereIn('professional_id', $professionalIds)
+            ->whereIn('status', ['programada', 'confirmada'])
+            ->where('scheduled_at', '<', $dayEnd)
+            ->whereRaw(
+                'DATE_ADD(scheduled_at, INTERVAL duration_minutes MINUTE) > ?',
+                [$dayStart->toDateTimeString()]
+            )
+            ->get(['professional_id', 'scheduled_at', 'duration_minutes'])
+            ->groupBy('professional_id');
+
+        // Evita ofrecer al mismo paciente otra cita que se cruce con ese horario.
+        $patientAppointments = collect();
+        if (!empty($data['patient_id'])) {
+            $patientAppointments = Appointment::query()
+                ->where('patient_id', $data['patient_id'])
+                ->whereIn('status', ['programada', 'confirmada'])
+                ->where('scheduled_at', '<', $dayEnd)
+                ->whereRaw(
+                    'DATE_ADD(scheduled_at, INTERVAL duration_minutes MINUTE) > ?',
+                    [$dayStart->toDateTimeString()]
+                )
+                ->get(['scheduled_at', 'duration_minutes']);
+        }
+
+        $slots = [];
+
+        foreach ($professionals as $professional) {
+            foreach ($schedules->get($professional->id, collect()) as $schedule) {
+                $scheduleStart = Carbon::parse($date . ' ' . $schedule->start_time);
+                $scheduleEnd = Carbon::parse($date . ' ' . $schedule->end_time);
+                $cursor = $scheduleStart->copy();
+
+                while ($cursor->copy()->addMinutes($duration)->lte($scheduleEnd)) {
+                    $slotStart = $cursor->copy();
+                    $slotEnd = $slotStart->copy()->addMinutes($duration);
+                    $cursor->addMinutes($duration);
+
+                    // No mostrar horas anteriores a la hora actual.
+                    if ($slotStart->lt(now())) {
+                        continue;
+                    }
+
+                    $hasBlock = $blocks
+                        ->get($professional->id, collect())
+                        ->contains(function ($block) use ($slotStart, $slotEnd) {
+                            return $block->starts_at->lt($slotEnd)
+                                && $block->ends_at->gt($slotStart);
+                        });
+
+                    $hasProfessionalConflict = $appointments
+                        ->get($professional->id, collect())
+                        ->contains(function ($appointment) use ($slotStart, $slotEnd) {
+                            $appointmentStart = $appointment->scheduled_at;
+                            $appointmentEnd = $appointmentStart->copy()
+                                ->addMinutes((int) $appointment->duration_minutes);
+
+                            return $appointmentStart->lt($slotEnd)
+                                && $appointmentEnd->gt($slotStart);
+                        });
+
+                    $hasPatientConflict = $patientAppointments->contains(
+                        function ($appointment) use ($slotStart, $slotEnd) {
+                            $appointmentStart = $appointment->scheduled_at;
+                            $appointmentEnd = $appointmentStart->copy()
+                                ->addMinutes((int) $appointment->duration_minutes);
+
+                            return $appointmentStart->lt($slotEnd)
+                                && $appointmentEnd->gt($slotStart);
+                        }
+                    );
+
+                    if ($hasBlock || $hasProfessionalConflict || $hasPatientConflict) {
+                        continue;
+                    }
+
+                    $slots[] = [
+                        'professional_id' => $professional->id,
+                        'professional_name' => $professional->user?->name
+                            ?? 'Profesional #' . $professional->id,
+                        'value' => $slotStart->format('Y-m-d\\TH:i'),
+                        'scheduled_at' => $slotStart->format('Y-m-d\\TH:i'),
+                        'time' => $slotStart->format('H:i'),
+                        'label' => $slotStart->format('H:i'),
+                        'duration_minutes' => $duration,
+                    ];
+                }
+            }
+        }
+
+        // Ordenar por hora y luego por nombre del profesional.
+        usort($slots, function ($a, $b) {
+            return strcmp($a['scheduled_at'], $b['scheduled_at'])
+                ?: strcmp($a['professional_name'], $b['professional_name']);
+        });
+
+        return response()->json([
+            'date' => $date,
+            'specialty_id' => $specialty->id,
+            'duration_minutes' => $duration,
+            'slots' => $slots,
+        ]);
+    }
+
     public function updateStatus(Request $request, Appointment $appointment)
     {
         $this->authorize('update', $appointment);
